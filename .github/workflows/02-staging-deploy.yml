@@ -1,0 +1,54 @@
+name: Staging - Deploy & Destroy
+
+on:
+  workflow_run:
+    workflows: [ "CI - Test, Build & Push" ]
+    types: [ "completed" ]
+
+jobs:
+  staging:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    env:
+      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+      AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
+      NAMESPACE: staging-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-tags
+          path: ./artifacts
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Set kubeconfig (from Azure CLI)
+        run: |
+          az aks get-credentials -g $AZURE_RESOURCE_GROUP -n $AKS_CLUSTER_NAME --overwrite-existing
+
+      - name: Create namespace
+        run: kubectl create namespace $NAMESPACE
+
+      - name: Deploy frontend
+        run: |
+          IMG=$(head -n1 ./artifacts/image-tags.txt)
+          kubectl -n $NAMESPACE create deployment frontend --image=$IMG
+          kubectl -n $NAMESPACE expose deployment frontend --port=80 --target-port=80
+
+      - name: Wait for frontend
+        run: kubectl -n $NAMESPACE rollout status deploy/frontend --timeout=180s
+
+      - name: Smoke test
+        run: |
+          kubectl -n $NAMESPACE port-forward deploy/frontend 8080:80 &
+          sleep 5
+          curl -I http://localhost:8080
+
+      - name: Destroy staging
+        if: always()
+        run: kubectl delete namespace $NAMESPACE

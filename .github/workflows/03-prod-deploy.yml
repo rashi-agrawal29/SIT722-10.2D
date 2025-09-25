@@ -1,0 +1,38 @@
+name: Prod - Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
+  PROD_NAMESPACE: prod
+
+jobs:
+  prod:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Set kubeconfig
+        run: |
+          az aks get-credentials -g $AZURE_RESOURCE_GROUP -n $AKS_CLUSTER_NAME --overwrite-existing
+
+      - name: Ensure namespace
+        run: kubectl get ns $PROD_NAMESPACE || kubectl create ns $PROD_NAMESPACE
+
+      - name: Deploy frontend
+        run: |
+          IMG=${{ secrets.ACR_LOGIN_SERVER }}/frontend:${GITHUB_SHA::7}
+          kubectl -n $PROD_NAMESPACE set image deployment/frontend frontend=$IMG --record || \
+          kubectl -n $PROD_NAMESPACE create deployment frontend --image=$IMG
+          kubectl -n $PROD_NAMESPACE expose deployment frontend --port=80 --target-port=80 --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Verify
+        run: kubectl -n $PROD_NAMESPACE rollout status deploy/frontend --timeout=180s
