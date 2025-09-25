@@ -47,7 +47,7 @@ jobs:
         run: |
           kubectl -n $NAMESPACE port-forward deploy/frontend 8080:80 &
           sleep 5
-          curl -I http://localhost:8080
+          curl -I http://localhost:8080 || exit 1
 
       - name: Destroy staging
         if: always()
