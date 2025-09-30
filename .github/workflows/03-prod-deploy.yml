@@ -1,38 +1,66 @@
-name: Prod - Deploy
+name: CD - Deploy to Production
 
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
 
 env:
-  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
-  AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
-  PROD_NAMESPACE: prod
+  RG_NAME: week10-rg
+  AKS_NAME: week10-aks
+  ACR_NAME: rashiweek10acr
+  K8S_DIR: k8s
+
+permissions:
+  contents: read
 
 jobs:
-  prod:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Set kubeconfig
+      - name: Get AKS credentials
+        run: az aks get-credentials -g "$RG_NAME" -n "$AKS_NAME" --overwrite-existing
+
+      # Resolve latest image tag (from frontend repo in ACR)
+      - name: Resolve image tag from ACR (latest)
+        id: tag
+        shell: bash
         run: |
-          az aks get-credentials -g $AZURE_RESOURCE_GROUP -n $AKS_CLUSTER_NAME --overwrite-existing
+          TAG=$(az acr repository show-tags \
+                -n "$ACR_NAME" --repository frontend \
+                --top 1 --orderby time_desc -o tsv)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using tag: $TAG"
 
-      - name: Ensure namespace
-        run: kubectl get ns $PROD_NAMESPACE || kubectl create ns $PROD_NAMESPACE
-
-      - name: Deploy frontend
+      # Replace IMAGE_TAG_HERE for all services in kustomization.yaml
+      - name: Inject image tag into k8s manifests
+        working-directory: ${{ env.K8S_DIR }}
         run: |
-          IMG=${{ secrets.ACR_LOGIN_SERVER }}/frontend:${GITHUB_SHA::7}
-          kubectl -n $PROD_NAMESPACE set image deployment/frontend frontend=$IMG --record || \
-          kubectl -n $PROD_NAMESPACE create deployment frontend --image=$IMG
-          kubectl -n $PROD_NAMESPACE expose deployment frontend --port=80 --target-port=80 --dry-run=client -o yaml | kubectl apply -f -
+          sed -i "s/IMAGE_TAG_HERE/${{ steps.tag.outputs.tag }}/g" kustomization.yaml
+          echo "==== kustomization.yaml ===="
+          cat kustomization.yaml
 
-      - name: Verify
-        run: kubectl -n $PROD_NAMESPACE rollout status deploy/frontend --timeout=180s
+      - name: Deploy to AKS
+        shell: bash
+        run: |
+          kubectl apply -k "${K8S_DIR}"
+          echo "--- Resources ---"
+          kubectl get deploy,svc,pods
+
+      - name: Wait for frontend rollout
+        shell: bash
+        run: |
+          for svc in product-service order-service customer-service frontend; do
+            echo "Waiting for rollout of $svc ..."
+            kubectl rollout status deploy/$svc --timeout=180s || true
+          done
+          kubectl get svc -o wide

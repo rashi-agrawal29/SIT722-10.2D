@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - product-deployment.yaml
+  - order-deployment.yaml
+  - customer-deployment.yaml
+  - frontend-deployment.yaml
+
+images:
+  - name: rashiweek10acr.azurecr.io/product_service
+    newTag: IMAGE_TAG_HERE
+  - name: rashiweek10acr.azurecr.io/order_service
+    newTag: IMAGE_TAG_HERE
+  - name: rashiweek10acr.azurecr.io/customer_service
+    newTag: IMAGE_TAG_HERE
+  - name: rashiweek10acr.azurecr.io/frontend
+    newTag: IMAGE_TAG_HERE
