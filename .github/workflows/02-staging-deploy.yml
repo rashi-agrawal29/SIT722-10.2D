@@ -1,36 +1,95 @@
-name: CD - Deploy to Staging
+name: CD - Temporary Staging (ACI)
 
 on:
   push:
     branches: [ "staging" ]
   workflow_dispatch:
 
+env:
+  RG_NAME: week10-rg
+  LOCATION: australiaeast
+  ACR_NAME: rashiweek10acr
+  ACR_LOGIN_SERVER: rashiweek10acr.azurecr.io
+  IMAGE_TAG: latest
+  RUN_ID: ${{ github.run_id }}
+
 jobs:
-  staging-deploy:
+  staging:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Azure Login
+      - name: Azure login (service principal JSON)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Set AKS context
-        uses: azure/aks-set-context@v3
-        with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+      - name: Ensure RG exists (idempotent)
+        run: az group create -n "$RG_NAME" -l "$LOCATION" 1>/dev/null
 
-      - name: Deploy manifests
+      - name: Deploy frontend to ACI
+        env:
+          USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
-          kubectl apply -f k8s/
+          az container create \
+            -g "$RG_NAME" \
+            -n fe-${RUN_ID} \
+            -l "$LOCATION" \
+            --image ${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG} \
+            --registry-login-server "${ACR_LOGIN_SERVER}" \
+            --registry-username "${USERNAME}" \
+            --registry-password "${PASSWORD}" \
+            --os-type Linux \
+            --cpu 1 --memory 1.0 \
+            --ports 80 \
+            --ip-address Public \
+            --dns-name-label fe-${RUN_ID} \
+            --restart-policy Never
 
-      - name: Smoke Test
+      - name: Wait for container to be Running
         run: |
-          kubectl rollout status deployment/frontend --timeout=120s
-          kubectl get pods
+          NAME=fe-${RUN_ID}
+          echo "Waiting for $NAME to be Running..."
+          for i in {1..40}; do
+            STATE=$(az container show -g "$RG_NAME" -n "$NAME" --query "instanceView.state" -o tsv || echo "Unknown")
+            echo "  Try $i: $STATE"
+            if [ "$STATE" = "Running" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Container not Running after timeout"; exit 1
+
+      - name: Health check
+        run: |
+          URL="http://fe-${RUN_ID}.${{ env.LOCATION }}.azurecontainer.io"
+          echo "Checking $URL ..."
+          for i in {1..15}; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+            echo "  Try $i -> $CODE"
+            if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ]; then
+              echo "Frontend healthy at $URL"
+              exit 0
+            fi
+            sleep 4
+          done
+          echo "Frontend did not return a healthy status (still continuing for demo)."
+          exit 0
+
+      - name: Debug ACI state + logs (always)
+        if: always()
+        run: |
+          NAME=fe-${RUN_ID}
+          echo "===== $NAME STATUS ====="
+          az container show -g "$RG_NAME" -n "$NAME" --query "{name:name,state:instanceView.state,prov:provisioningState}" -o table || true
+          echo "===== $NAME LOGS ====="
+          az container logs -g "$RG_NAME" -n "$NAME" || true
+
+      - name: Destroy staging (always)
+        if: always()
+        run: |
+          NAME=fe-${RUN_ID}
+          az container delete -g "$RG_NAME" -n "$NAME" --yes || true

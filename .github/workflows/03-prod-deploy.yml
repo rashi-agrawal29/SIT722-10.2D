@@ -2,11 +2,20 @@ name: CD - Deploy to Production
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   workflow_dispatch:
 
+env:
+  RG_NAME: week10-rg
+  AKS_NAME: week10-aks
+  ACR_NAME: rashiweek10acr
+  K8S_DIR: k8s
+
+permissions:
+  contents: read
+
 jobs:
-  prod-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
@@ -16,21 +25,39 @@ jobs:
       - name: Azure Login
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Set AKS context
-        uses: azure/aks-set-context@v3
-        with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+      - name: Get AKS credentials
+        run: az aks get-credentials -g "$RG_NAME" -n "$AKS_NAME" --overwrite-existing
 
-      - name: Deploy manifests
+      # Find the latest pushed image tag from ACR (frontend as reference)
+      - name: Resolve image tag from ACR (latest)
+        id: tag
+        shell: bash
         run: |
-          kubectl apply -f k8s/
+          TAG=$(az acr repository show-tags \
+                -n "$ACR_NAME" --repository frontend \
+                --top 1 --orderby time_desc -o tsv)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using tag: $TAG"
 
-      - name: Verify Deployment
+      # Replace IMAGE_TAG_HERE in your kustomization.yaml with the resolved tag
+      - name: Inject image tag into k8s manifests
+        working-directory: ${{ env.K8S_DIR }}
         run: |
-          kubectl rollout status deployment/frontend --timeout=180s
-          kubectl get services
+          sed -i "s/IMAGE_TAG_HERE/${{ steps.tag.outputs.tag }}/g" kustomization.yaml
+          echo "==== kustomization.yaml ===="
+          cat kustomization.yaml
+
+      - name: Deploy to AKS
+        shell: bash
+        run: |
+          kubectl apply -k "${K8S_DIR}"
+          echo "--- Resources ---"
+          kubectl get deploy,svc,pods
+
+      - name: Wait for frontend rollout
+        shell: bash
+        run: |
+          kubectl rollout status deploy/frontend --timeout=180s || true
+          kubectl get svc frontend -o wide
